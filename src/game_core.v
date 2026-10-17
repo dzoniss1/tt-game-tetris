@@ -1,0 +1,484 @@
+/*
+ * Tetris game core for the Vulkos / Tiny Tapeout game-track shell.
+ * Replaces src/game_core.v. Uses the shell's x, y, active, frame.
+ *
+ * Buttons (active high, raw, synchronised and frame-sampled inside):
+ *   left, right, rot (rotate), down (soft drop). Any button starts / restarts.
+ *
+ * Plain Verilog-2001: no signed types, no functions, no generate blocks,
+ * no vectors wider than 20 bits (board = 20 separate 10-bit rows).
+ * Game logic is serialized around ONE collision checker (16 cycles/test)
+ * and runs in vertical blanking, so there is no tearing.
+ */
+`default_nettype none
+
+// One board row: 10 cells. clr has priority, then shift (take row above), then set.
+module tt_tetris_row (
+    input  wire       clk,
+    input  wire       clr,
+    input  wire       shift,
+    input  wire [9:0] above,
+    input  wire [9:0] set,
+    output reg  [9:0] q
+);
+  always @(posedge clk) begin
+    if (clr)        q <= 10'd0;
+    else if (shift) q <= above;
+    else            q <= q | set;
+  end
+endmodule
+
+module game_core (
+    input  wire       clk,
+    input  wire       rst_n,
+    input  wire       left,
+    input  wire       right,
+    input  wire       rot,
+    input  wire       down,
+    input  wire [9:0] x,
+    input  wire [9:0] y,
+    input  wire       active,
+    input  wire       frame,
+    output wire [5:0] rgb        // {R[1:0], G[1:0], B[1:0]}
+);
+
+  wire rst = ~rst_n;
+
+  // ------------------------------------------------------------------
+  // Pixel -> board cell counters (no dividers). Board is 10x20 cells of
+  // 20x20 pixels at (220,40). Registers describe the CURRENT pixel x,y.
+  // ------------------------------------------------------------------
+  localparam X0   = 220;
+  localparam Y0   = 40;
+  localparam CELL = 20;
+
+  reg       in_x, in_y;
+  reg [3:0] bx;
+  reg [4:0] bxs;
+  reg [4:0] by, bys;
+
+  always @(posedge clk) begin
+    if (rst) begin
+      in_x <= 1'b0; in_y <= 1'b0;
+      bx <= 4'd0; bxs <= 5'd0; by <= 5'd0; bys <= 5'd0;
+    end else begin
+      if (x == X0 - 1) begin
+        in_x <= 1'b1; bx <= 4'd0; bxs <= 5'd0;
+      end else if (in_x) begin
+        if (bxs == CELL - 1) begin
+          bxs <= 5'd0;
+          if (bx == 4'd9) in_x <= 1'b0;
+          else            bx <= bx + 4'd1;
+        end else
+          bxs <= bxs + 5'd1;
+      end
+
+      if (x == 10'd799) begin
+        if (y == Y0 - 1) begin
+          in_y <= 1'b1; by <= 5'd0; bys <= 5'd0;
+        end else if (in_y) begin
+          if (bys == CELL - 1) begin
+            bys <= 5'd0;
+            if (by == 5'd19) in_y <= 1'b0;
+            else             by <= by + 5'd1;
+          end else
+            bys <= bys + 5'd1;
+        end
+      end
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // Game state
+  // ------------------------------------------------------------------
+  localparam S_IDLE  = 3'd0,  // wait for frame tick
+             S_NEXT  = 3'd1,  // pick next action (rotate, sideways, down)
+             S_TRY   = 3'd2,  // run 16-cycle collision test
+             S_RES   = 3'd3,  // evaluate test result
+             S_LOCK  = 3'd4,  // write piece into board
+             S_CLR   = 3'd5,  // clear full rows, one per cycle
+             S_SPAWN = 3'd6,  // pick random piece and test spawn
+             S_OVER  = 3'd7;  // title / game over: wait for button
+
+  localparam OP_ROT = 3'd0, OP_L = 3'd1, OP_R = 3'd2, OP_D = 3'd3, OP_SPAWN = 3'd4;
+
+  reg [2:0]  st;
+  reg [2:0]  op;
+  reg [1:0]  stage;           // 0 rotate, 1 sideways, 2 down
+  reg [1:0]  kick;
+  reg [3:0]  k;               // cell index inside 4x4 box, row-major
+  reg        hit;
+  reg        over;
+
+  // Piece column is stored BIASED by +4 (real column = pxb - 4), so no
+  // signed arithmetic is needed. Real range -2..9 -> pxb 2..13.
+  reg [15:0] cur;             // current piece 4x4 bitmap, bit = row*4+col
+  reg [2:0]  ptype;
+  reg [3:0]  pxb;
+  reg [4:0]  py;
+  reg [15:0] t_shape;         // test candidate
+  reg [3:0]  t_xb;
+  reg [4:0]  t_y;
+
+  reg [15:0] lfsr;
+  reg [7:0]  lines;
+  reg [3:0]  lcnt, level;
+  reg [5:0]  gcnt;
+
+  // inputs
+  reg [3:0]  in_s1, in_s2, in_prev;
+  reg        want_rot, want_h, hdir, want_d, fpar;
+  reg [3:0]  hcnt;
+
+  wire in_l = in_s2[0], in_r = in_s2[1], in_rot = in_s2[2], in_d = in_s2[3];
+  wire any_edge = |(in_s2 & ~in_prev);
+  wire restart  = (st == S_OVER) && frame && any_edge;
+
+  localparam DAS = 4'd12;
+
+  wire [5:0] period = 6'd40 - {level, 2'b00};
+  wire       g_due  = ({1'b0, gcnt} + 7'd1) >= {1'b0, period};
+
+  // --- tetromino bitmaps (row 0 = bits 3:0). I uses 4x4 box, others 3x3.
+  reg [15:0] rom_shape;
+  always @(*) begin
+    case (lfsr[2:0])
+      3'd0:    rom_shape = 16'h00F0; // I
+      3'd1:    rom_shape = 16'h0660; // O
+      3'd2:    rom_shape = 16'h0072; // T
+      3'd3:    rom_shape = 16'h0036; // S
+      3'd4:    rom_shape = 16'h0063; // Z
+      3'd5:    rom_shape = 16'h0071; // J
+      default: rom_shape = 16'h0074; // L (6); 7 is rejected at spawn
+    endcase
+  end
+
+  // --- clockwise rotation: new[r][c] = old[N-1-c][r]
+  wire [15:0] rot4 = { cur[3], cur[7], cur[11], cur[15], cur[2], cur[6], cur[10], cur[14], cur[1], cur[5], cur[9], cur[13], cur[0], cur[4], cur[8], cur[12] };
+  wire [15:0] rot3 = { 1'b0, 1'b0, 1'b0, 1'b0, 1'b0, cur[2], cur[6], cur[10], 1'b0, cur[1], cur[5], cur[9], 1'b0, cur[0], cur[4], cur[8] };
+  wire [15:0] rotcand = (ptype == 3'd0) ? rot4 :
+                        (ptype == 3'd1) ? cur  : rot3;
+
+  // ------------------------------------------------------------------
+  // Board: 20 rows of 10 cells, row 19 = bottom
+  // ------------------------------------------------------------------
+  wire [9:0] r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19;
+
+  // cell under test / lock: (t_xb + k%4, t_y + k/4)
+  wire [4:0] axb = {1'b0, t_xb} + {3'b000, k[1:0]};      // biased column
+  wire [5:0] ay  = {1'b0, t_y} + {4'b0000, k[3:2]};
+  wire oob = (axb < 5'd4) || (axb >= 5'd14) || (ay >= 6'd20);
+  wire [3:0] axr = axb[3:0] - 4'd4;                      // real column 0..9
+
+  reg [9:0] crow;
+  always @(*) begin
+    case (ay[4:0])
+      5'd0: crow = r0;
+      5'd1: crow = r1;
+      5'd2: crow = r2;
+      5'd3: crow = r3;
+      5'd4: crow = r4;
+      5'd5: crow = r5;
+      5'd6: crow = r6;
+      5'd7: crow = r7;
+      5'd8: crow = r8;
+      5'd9: crow = r9;
+      5'd10: crow = r10;
+      5'd11: crow = r11;
+      5'd12: crow = r12;
+      5'd13: crow = r13;
+      5'd14: crow = r14;
+      5'd15: crow = r15;
+      5'd16: crow = r16;
+      5'd17: crow = r17;
+      5'd18: crow = r18;
+      5'd19: crow = r19;
+      default: crow = 10'h3FF;
+    endcase
+  end
+  wire cell_blk = oob | crow[axr];
+
+  wire lock_wr  = (st == S_LOCK) && t_shape[k];
+  wire do_shift = (st == S_CLR);
+  wire clr_all  = rst | restart;
+
+  wire [19:0] rdec = 20'd1 << ay[4:0];
+  wire [9:0]  cdec = 10'd1 << axr;
+  wire [9:0]  setm = lock_wr ? cdec : 10'd0;
+
+  wire [19:0] full = { (&r19), (&r18), (&r17), (&r16), (&r15), (&r14), (&r13), (&r12), (&r11), (&r10), (&r9), (&r8), (&r7), (&r6), (&r5), (&r4), (&r3), (&r2), (&r1), (&r0) };
+  // sfx[i]: a full row exists at row i or below (higher index)
+  wire [19:0] sfx;
+  assign sfx[19] = full[19];
+  assign sfx[18] = |full[19:18];
+  assign sfx[17] = |full[19:17];
+  assign sfx[16] = |full[19:16];
+  assign sfx[15] = |full[19:15];
+  assign sfx[14] = |full[19:14];
+  assign sfx[13] = |full[19:13];
+  assign sfx[12] = |full[19:12];
+  assign sfx[11] = |full[19:11];
+  assign sfx[10] = |full[19:10];
+  assign sfx[9]  = |full[19:9];
+  assign sfx[8]  = |full[19:8];
+  assign sfx[7]  = |full[19:7];
+  assign sfx[6]  = |full[19:6];
+  assign sfx[5]  = |full[19:5];
+  assign sfx[4]  = |full[19:4];
+  assign sfx[3]  = |full[19:3];
+  assign sfx[2]  = |full[19:2];
+  assign sfx[1]  = |full[19:1];
+  assign sfx[0]  = |full[19:0];
+
+  tt_tetris_row u0 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[0]), .above(10'd0), .set(rdec[0] ? setm : 10'd0), .q(r0));
+  tt_tetris_row u1 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[1]), .above(r0), .set(rdec[1] ? setm : 10'd0), .q(r1));
+  tt_tetris_row u2 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[2]), .above(r1), .set(rdec[2] ? setm : 10'd0), .q(r2));
+  tt_tetris_row u3 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[3]), .above(r2), .set(rdec[3] ? setm : 10'd0), .q(r3));
+  tt_tetris_row u4 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[4]), .above(r3), .set(rdec[4] ? setm : 10'd0), .q(r4));
+  tt_tetris_row u5 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[5]), .above(r4), .set(rdec[5] ? setm : 10'd0), .q(r5));
+  tt_tetris_row u6 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[6]), .above(r5), .set(rdec[6] ? setm : 10'd0), .q(r6));
+  tt_tetris_row u7 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[7]), .above(r6), .set(rdec[7] ? setm : 10'd0), .q(r7));
+  tt_tetris_row u8 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[8]), .above(r7), .set(rdec[8] ? setm : 10'd0), .q(r8));
+  tt_tetris_row u9 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[9]), .above(r8), .set(rdec[9] ? setm : 10'd0), .q(r9));
+  tt_tetris_row u10 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[10]), .above(r9), .set(rdec[10] ? setm : 10'd0), .q(r10));
+  tt_tetris_row u11 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[11]), .above(r10), .set(rdec[11] ? setm : 10'd0), .q(r11));
+  tt_tetris_row u12 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[12]), .above(r11), .set(rdec[12] ? setm : 10'd0), .q(r12));
+  tt_tetris_row u13 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[13]), .above(r12), .set(rdec[13] ? setm : 10'd0), .q(r13));
+  tt_tetris_row u14 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[14]), .above(r13), .set(rdec[14] ? setm : 10'd0), .q(r14));
+  tt_tetris_row u15 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[15]), .above(r14), .set(rdec[15] ? setm : 10'd0), .q(r15));
+  tt_tetris_row u16 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[16]), .above(r15), .set(rdec[16] ? setm : 10'd0), .q(r16));
+  tt_tetris_row u17 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[17]), .above(r16), .set(rdec[17] ? setm : 10'd0), .q(r17));
+  tt_tetris_row u18 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[18]), .above(r17), .set(rdec[18] ? setm : 10'd0), .q(r18));
+  tt_tetris_row u19 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[19]), .above(r18), .set(rdec[19] ? setm : 10'd0), .q(r19));
+
+  // ------------------------------------------------------------------
+  // Game FSM
+  // ------------------------------------------------------------------
+  always @(posedge clk) begin
+    in_s1 <= {down, rot, right, left};
+    in_s2 <= in_s1;
+    lfsr  <= {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
+
+    if (rst) begin
+      st <= S_OVER; op <= OP_ROT; stage <= 2'd0; kick <= 2'd0; k <= 4'd0;
+      hit <= 1'b0; over <= 1'b0;
+      cur <= 16'd0; ptype <= 3'd0; pxb <= 4'd4; py <= 5'd0;
+      t_shape <= 16'd0; t_xb <= 4'd4; t_y <= 5'd0;
+      lfsr <= 16'hACE1;
+      lines <= 8'd0; lcnt <= 4'd0; level <= 4'd0; gcnt <= 6'd0;
+      in_s1 <= 4'd0; in_s2 <= 4'd0; in_prev <= 4'd0;
+      want_rot <= 1'b0; want_h <= 1'b0; hdir <= 1'b0; want_d <= 1'b0;
+      fpar <= 1'b0; hcnt <= 4'd0;
+    end else begin
+
+      // ---- per-frame input processing (frame tick happens in IDLE/OVER)
+      if (frame) begin
+        in_prev  <= in_s2;
+        fpar     <= ~fpar;
+        want_rot <= in_rot & ~in_prev[2];
+
+        hdir <= in_l;
+        if (!(in_l | in_r)) begin
+          hcnt <= 4'd0; want_h <= 1'b0;
+        end else if (hcnt == 4'd0) begin
+          hcnt <= 4'd1; want_h <= 1'b1;
+        end else if (hcnt == DAS) begin
+          hcnt <= DAS - 4'd3; want_h <= 1'b1;
+        end else begin
+          hcnt <= hcnt + 4'd1; want_h <= 1'b0;
+        end
+
+        gcnt   <= g_due ? 6'd0 : gcnt + 6'd1;
+        want_d <= g_due | (in_d & fpar);
+      end
+
+      case (st)
+        S_IDLE: if (frame) begin
+          stage <= 2'd0;
+          st    <= S_NEXT;
+        end
+
+        S_NEXT: begin
+          case (stage)
+            2'd0: begin
+              if (want_rot) begin
+                op <= OP_ROT; kick <= 2'd0;
+                t_shape <= rotcand; t_xb <= pxb; t_y <= py;
+                k <= 4'd0; hit <= 1'b0; st <= S_TRY;
+              end else stage <= 2'd1;
+            end
+            2'd1: begin
+              if (want_h) begin
+                op <= hdir ? OP_L : OP_R;
+                t_shape <= cur; t_xb <= hdir ? pxb - 4'd1 : pxb + 4'd1; t_y <= py;
+                k <= 4'd0; hit <= 1'b0; st <= S_TRY;
+              end else stage <= 2'd2;
+            end
+            2'd2: begin
+              if (want_d) begin
+                op <= OP_D;
+                t_shape <= cur; t_xb <= pxb; t_y <= py + 5'd1;
+                k <= 4'd0; hit <= 1'b0; st <= S_TRY;
+              end else st <= S_IDLE;
+            end
+            default: st <= S_IDLE;
+          endcase
+        end
+
+        S_TRY: begin
+          if (t_shape[k] && cell_blk) hit <= 1'b1;
+          k <= k + 4'd1;
+          if (k == 4'd15) st <= S_RES;
+        end
+
+        S_RES: begin
+          if (!hit) begin
+            case (op)
+              OP_ROT:   begin cur <= t_shape; pxb <= t_xb; end
+              OP_L,
+              OP_R:     pxb <= t_xb;
+              OP_D:     begin py <= t_y; gcnt <= 6'd0; end
+              default:  begin cur <= t_shape; pxb <= t_xb; py <= 5'd0; end
+            endcase
+            if (op == OP_SPAWN) st <= S_IDLE;
+            else begin stage <= stage + 2'd1; st <= S_NEXT; end
+          end else begin
+            case (op)
+              OP_ROT: begin
+                if (kick != 2'd2) begin
+                  kick <= kick + 2'd1;
+                  t_xb <= (kick == 2'd0) ? pxb - 4'd1 : pxb + 4'd1;
+                  k <= 4'd0; hit <= 1'b0; st <= S_TRY;
+                end else begin
+                  stage <= stage + 2'd1; st <= S_NEXT;
+                end
+              end
+              OP_L, OP_R: begin stage <= stage + 2'd1; st <= S_NEXT; end
+              OP_D: begin t_y <= py; k <= 4'd0; st <= S_LOCK; end
+              default: begin over <= 1'b1; st <= S_OVER; end
+            endcase
+          end
+        end
+
+        S_LOCK: begin       // row write handled by setm / rdec
+          k <= k + 4'd1;
+          if (k == 4'd15) st <= S_CLR;
+        end
+
+        S_CLR: begin        // row shift handled by do_shift & sfx
+          if (sfx[0]) begin
+            lines <= lines + 8'd1;
+            if (lcnt == 4'd9) begin
+              lcnt <= 4'd0;
+              if (level != 4'd8) level <= level + 4'd1;
+            end else
+              lcnt <= lcnt + 4'd1;
+          end else
+            st <= S_SPAWN;
+        end
+
+        S_SPAWN: begin
+          if (lfsr[2:0] != 3'd7) begin      // reject 7: uniform over 7 pieces
+            ptype   <= lfsr[2:0];
+            t_shape <= rom_shape;
+            t_xb    <= 4'd7;                // real column 3
+            t_y     <= 5'd0;
+            op      <= OP_SPAWN;
+            k <= 4'd0; hit <= 1'b0; gcnt <= 6'd0;
+            st <= S_TRY;
+          end
+        end
+
+        default: begin      // S_OVER
+          if (restart) begin
+            over  <= 1'b0;
+            lines <= 8'd0; lcnt <= 4'd0; level <= 4'd0; gcnt <= 6'd0;
+            cur   <= 16'd0;
+            st    <= S_SPAWN;
+          end
+        end
+      endcase
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // Video
+  // ------------------------------------------------------------------
+  wire [5:0] dxs = {2'b00, bx} + 6'd4 - {2'b00, pxb};   // wraps if negative
+  wire [5:0] dys = {1'b0, by} - {1'b0, py};
+  wire piece_on = (dxs[5:2] == 4'd0) && (dys[5:2] == 4'd0) && cur[{dys[1:0], dxs[1:0]}];
+
+  reg [9:0] vrow;
+  always @(*) begin
+    case (by)
+      5'd0: vrow = r0;
+      5'd1: vrow = r1;
+      5'd2: vrow = r2;
+      5'd3: vrow = r3;
+      5'd4: vrow = r4;
+      5'd5: vrow = r5;
+      5'd6: vrow = r6;
+      5'd7: vrow = r7;
+      5'd8: vrow = r8;
+      5'd9: vrow = r9;
+      5'd10: vrow = r10;
+      5'd11: vrow = r11;
+      5'd12: vrow = r12;
+      5'd13: vrow = r13;
+      5'd14: vrow = r14;
+      5'd15: vrow = r15;
+      5'd16: vrow = r16;
+      5'd17: vrow = r17;
+      5'd18: vrow = r18;
+      5'd19: vrow = r19;
+      default: vrow = 10'd0;
+    endcase
+  end
+  wire lit = vrow[bx];
+
+  wire edge_px = (bxs == 5'd0) || (bys == 5'd0);
+
+  reg [5:0] piece_col;
+  always @(*) begin
+    case (ptype)
+      3'd0:    piece_col = 6'b001111; // I cyan
+      3'd1:    piece_col = 6'b111100; // O yellow
+      3'd2:    piece_col = 6'b110011; // T magenta
+      3'd3:    piece_col = 6'b001100; // S green
+      3'd4:    piece_col = 6'b110000; // Z red
+      3'd5:    piece_col = 6'b000011; // J blue
+      default: piece_col = 6'b111000; // L orange
+    endcase
+  end
+
+  // side indicators: lines (8 bits, green) and level (4 bits, yellow)
+  wire in_p1 = in_y && (x >= 440) && (x < 460) && (by < 5'd8);
+  wire in_p2 = in_y && (x >= 470) && (x < 490) && (by < 5'd4);
+  wire p_edge = (bys == 5'd0) || (bys == CELL - 1) || (x == 440) || (x == 459)
+                                                  || (x == 470) || (x == 489);
+
+  wire in_frame = (x >= X0 - 4) && (x < X0 + 10*CELL + 4) &&
+                  (y >= Y0 - 4) && (y < Y0 + 20*CELL + 4);
+
+  reg [5:0] rgb6;
+  always @(*) begin
+    rgb6 = 6'b000000;
+    if (in_x && in_y) begin
+      if (edge_px)
+        rgb6 = (lit || piece_on) ? 6'b010101 : 6'b000001;
+      else if (piece_on)
+        rgb6 = piece_col;
+      else if (lit)
+        rgb6 = over ? 6'b110000 : 6'b101010;
+    end else if (in_frame) begin
+      rgb6 = 6'b101010;
+    end else if (in_p1) begin
+      rgb6 = p_edge ? 6'b000000 : (lines[by[2:0]] ? 6'b001100 : 6'b010101);
+    end else if (in_p2) begin
+      rgb6 = p_edge ? 6'b000000 : (level[by[1:0]] ? 6'b111100 : 6'b010101);
+    end
+  end
+
+  assign rgb = active ? rgb6 : 6'b000000;
+
+endmodule

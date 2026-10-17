@@ -1,27 +1,34 @@
-/*
- * Copyright (c) 2024 Your Name
- * SPDX-License-Identifier: Apache-2.0
- */
-
+// Tiny Tapeout top for the Tetris core. Same as the given game shell, except it
+// also passes ui_in[2] (rotate) and ui_in[3] (down) to the core.
 `default_nettype none
 
-module tt_um_example (
-    input  wire [7:0] ui_in,    // Dedicated inputs
-    output wire [7:0] uo_out,   // Dedicated outputs
-    input  wire [7:0] uio_in,   // IOs: Input path
-    output wire [7:0] uio_out,  // IOs: Output path
-    output wire [7:0] uio_oe,   // IOs: Enable path (active high: 0=input, 1=output)
-    input  wire       ena,      // always 1 when the design is powered, so you can ignore it
-    input  wire       clk,      // clock
-    input  wire       rst_n     // reset_n - low to reset
+module tt_um_dzoniss1_game_paddle_and_ball (
+    input  wire [7:0] ui_in,
+    output wire [7:0] uo_out,
+    input  wire [7:0] uio_in,
+    output wire [7:0] uio_out,
+    output wire [7:0] uio_oe,
+    input  wire       ena,
+    input  wire       clk,
+    input  wire       rst_n
 );
+    wire        hsync, vsync, active, frame;
+    wire [9:0]  x, y;
+    wire [5:0]  rgb;
 
-  // All output pins must be assigned. If not used, assign to 0.
-  assign uo_out  = ui_in + uio_in;  // Example: ou_out is the sum of ui_in and uio_in
-  assign uio_out = 0;
-  assign uio_oe  = 0;
+    vga_sync vga (.clk(clk), .rst_n(rst_n), .hsync(hsync), .vsync(vsync), .active(active), .x(x), .y(y), .frame(frame));
 
-  // List all unused inputs to prevent warnings
-  wire _unused = &{ena, clk, rst_n, 1'b0};
+    game_core core (
+        .clk(clk), .rst_n(rst_n),
+        .left(ui_in[0]), .right(ui_in[1]), .rot(ui_in[2]), .down(ui_in[3]),
+        .x(x), .y(y), .active(active), .frame(frame),
+        .rgb(rgb)
+    );
 
+    // TinyVGA PMOD pin order: {hsync, B0, G0, R0, vsync, B1, G1, R1}
+    assign uo_out = {hsync, rgb[0], rgb[2], rgb[4], vsync, rgb[1], rgb[3], rgb[5]};
+    assign uio_out = 8'd0;
+    assign uio_oe  = 8'd0;
+
+    wire _unused = &{ena, uio_in, ui_in[7:4], 1'b0};
 endmodule
