@@ -28,6 +28,27 @@ module tt_tetris_row (
   end
 endmodule
 
+// Stores one 10-cell row of 6-bit colours.
+module tt_tetris_colour_row (
+    input  wire        clk,
+    input  wire        clr,
+    input  wire        shift,
+    input  wire [59:0] above,
+    input  wire        wr,
+    input  wire [3:0]  col,
+    input  wire [5:0]  colour,
+    output reg  [59:0] q
+);
+  always @(posedge clk) begin
+    if (clr)
+      q <= 60'd0;
+    else if (shift)
+      q <= above;
+    else if (wr)
+      q[col*6 +: 6] <= colour;
+  end
+endmodule
+
 module game_core (
     input  wire       clk,
     input  wire       rst_n,
@@ -41,6 +62,7 @@ module game_core (
     input  wire       frame,
     output wire [5:0] rgb        // {R[1:0], G[1:0], B[1:0]}
 );
+
 
   wire rst = ~rst_n;
 
@@ -125,6 +147,12 @@ module game_core (
   reg [3:0]  lcnt, level;
   reg [5:0]  gcnt;
 
+   // Score: one point for each tetromino locked into the board.
+  reg [9:0] score;
+  reg [9:0] best_score;
+
+  wire [9:0] score_next = score + 10'd1;
+
   // inputs
   reg [3:0]  in_s1, in_s2, in_prev;
   reg        want_rot, want_h, hdir, want_d, fpar;
@@ -163,6 +191,19 @@ module game_core (
   // Board: 20 rows of 10 cells, row 19 = bottom
   // ------------------------------------------------------------------
   wire [9:0] r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19;
+
+  wire [59:0] cr0, cr1, cr2, cr3, cr4, cr5, cr6, cr7, cr8, cr9;
+  wire [59:0] cr10, cr11, cr12, cr13, cr14, cr15, cr16, cr17, cr18, cr19;
+
+  // The colour written into a cell comes from the piece being locked.
+  wire [5:0] lock_colour =
+      (ptype == 3'd0) ? 6'b100000 :
+      (ptype == 3'd1) ? 6'b111101 :
+      (ptype == 3'd2) ? 6'b111110 :
+      (ptype == 3'd3) ? 6'b101111 :
+      (ptype == 3'd4) ? 6'b101110 :
+      (ptype == 3'd5) ? 6'b110110 :
+                        6'b110111;
 
   // cell under test / lock: (t_xb + k%4, t_y + k/4)
   wire [4:0] axb = {1'b0, t_xb} + {3'b000, k[1:0]};      // biased column
@@ -251,6 +292,30 @@ module game_core (
   tt_tetris_row u18 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[18]), .above(r17), .set(rdec[18] ? setm : 10'd0), .q(r18));
   tt_tetris_row u19 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[19]), .above(r18), .set(rdec[19] ? setm : 10'd0), .q(r19));
 
+
+
+  tt_tetris_colour_row c0  (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[0]),  .above(60'd0), .wr(lock_wr & rdec[0]),  .col(axr), .colour(lock_colour), .q(cr0));
+  tt_tetris_colour_row c1  (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[1]),  .above(cr0),   .wr(lock_wr & rdec[1]),  .col(axr), .colour(lock_colour), .q(cr1));
+  tt_tetris_colour_row c2  (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[2]),  .above(cr1),   .wr(lock_wr & rdec[2]),  .col(axr), .colour(lock_colour), .q(cr2));
+  tt_tetris_colour_row c3  (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[3]),  .above(cr2),   .wr(lock_wr & rdec[3]),  .col(axr), .colour(lock_colour), .q(cr3));
+  tt_tetris_colour_row c4  (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[4]),  .above(cr3),   .wr(lock_wr & rdec[4]),  .col(axr), .colour(lock_colour), .q(cr4));
+  tt_tetris_colour_row c5  (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[5]),  .above(cr4),   .wr(lock_wr & rdec[5]),  .col(axr), .colour(lock_colour), .q(cr5));
+  tt_tetris_colour_row c6  (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[6]),  .above(cr5),   .wr(lock_wr & rdec[6]),  .col(axr), .colour(lock_colour), .q(cr6));
+  tt_tetris_colour_row c7  (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[7]),  .above(cr6),   .wr(lock_wr & rdec[7]),  .col(axr), .colour(lock_colour), .q(cr7));
+  tt_tetris_colour_row c8  (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[8]),  .above(cr7),   .wr(lock_wr & rdec[8]),  .col(axr), .colour(lock_colour), .q(cr8));
+  tt_tetris_colour_row c9  (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[9]),  .above(cr8),   .wr(lock_wr & rdec[9]),  .col(axr), .colour(lock_colour), .q(cr9));
+  tt_tetris_colour_row c10 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[10]), .above(cr9),   .wr(lock_wr & rdec[10]), .col(axr), .colour(lock_colour), .q(cr10));
+  tt_tetris_colour_row c11 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[11]), .above(cr10),  .wr(lock_wr & rdec[11]), .col(axr), .colour(lock_colour), .q(cr11));
+  tt_tetris_colour_row c12 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[12]), .above(cr11),  .wr(lock_wr & rdec[12]), .col(axr), .colour(lock_colour), .q(cr12));
+  tt_tetris_colour_row c13 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[13]), .above(cr12),  .wr(lock_wr & rdec[13]), .col(axr), .colour(lock_colour), .q(cr13));
+  tt_tetris_colour_row c14 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[14]), .above(cr13),  .wr(lock_wr & rdec[14]), .col(axr), .colour(lock_colour), .q(cr14));
+  tt_tetris_colour_row c15 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[15]), .above(cr14),  .wr(lock_wr & rdec[15]), .col(axr), .colour(lock_colour), .q(cr15));
+  tt_tetris_colour_row c16 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[16]), .above(cr15),  .wr(lock_wr & rdec[16]), .col(axr), .colour(lock_colour), .q(cr16));
+  tt_tetris_colour_row c17 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[17]), .above(cr16),  .wr(lock_wr & rdec[17]), .col(axr), .colour(lock_colour), .q(cr17));
+  tt_tetris_colour_row c18 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[18]), .above(cr17),  .wr(lock_wr & rdec[18]), .col(axr), .colour(lock_colour), .q(cr18));
+  tt_tetris_colour_row c19 (.clk(clk), .clr(clr_all), .shift(do_shift & sfx[19]), .above(cr18),  .wr(lock_wr & rdec[19]), .col(axr), .colour(lock_colour), .q(cr19));
+
+
   // ------------------------------------------------------------------
   // Game FSM
   // ------------------------------------------------------------------
@@ -269,6 +334,10 @@ module game_core (
       in_s1 <= 4'd0; in_s2 <= 4'd0; in_prev <= 4'd0;
       want_rot <= 1'b0; want_h <= 1'b0; hdir <= 1'b0; want_d <= 1'b0;
       fpar <= 1'b0; hcnt <= 4'd0;
+
+      score <= 10'd0;
+      best_score <= 10'd0;
+
     end else begin
 
       // ---- per-frame input processing (frame tick happens in IDLE/OVER)
@@ -360,9 +429,17 @@ module game_core (
           end
         end
 
-        S_LOCK: begin       // row write handled by setm / rdec
+          S_LOCK: begin
           k <= k + 4'd1;
-          if (k == 4'd15) st <= S_CLR;
+          if (k == 4'd15) begin
+            st <= S_CLR;
+
+            // Count this tetromino once, at the end of its lock operation.
+            score <= score_next;
+
+            if (score_next > best_score)
+              best_score <= score_next;
+          end
         end
 
         S_CLR: begin        // row shift handled by do_shift & sfx
@@ -395,6 +472,7 @@ module game_core (
             lines <= 8'd0; lcnt <= 4'd0; level <= 4'd0; gcnt <= 6'd0;
             cur   <= 16'd0;
             st    <= S_SPAWN;
+            score <= 10'd0;
           end
         end
       endcase
@@ -764,6 +842,38 @@ end
       default: vrow = 10'd0;
     endcase
   end
+
+ reg [59:0] vcolour_row;
+
+  always @(*) begin
+    case (by)
+      5'd0:  vcolour_row = cr0;
+      5'd1:  vcolour_row = cr1;
+      5'd2:  vcolour_row = cr2;
+      5'd3:  vcolour_row = cr3;
+      5'd4:  vcolour_row = cr4;
+      5'd5:  vcolour_row = cr5;
+      5'd6:  vcolour_row = cr6;
+      5'd7:  vcolour_row = cr7;
+      5'd8:  vcolour_row = cr8;
+      5'd9:  vcolour_row = cr9;
+      5'd10: vcolour_row = cr10;
+      5'd11: vcolour_row = cr11;
+      5'd12: vcolour_row = cr12;
+      5'd13: vcolour_row = cr13;
+      5'd14: vcolour_row = cr14;
+      5'd15: vcolour_row = cr15;
+      5'd16: vcolour_row = cr16;
+      5'd17: vcolour_row = cr17;
+      5'd18: vcolour_row = cr18;
+      5'd19: vcolour_row = cr19;
+      default: vcolour_row = 60'd0;
+    endcase
+  end
+
+  wire [5:0] stored_colour = vcolour_row[bx*6 +: 6];
+
+
   wire lit = vrow[bx];
 
   wire edge_px = (bxs == 5'd0) || (bys == 5'd0);
@@ -795,6 +905,180 @@ end
   wire p_edge = (bys == 5'd0) || (bys == CELL - 1) || (x == 440) || (x == 459)
                                                   || (x == 470) || (x == 489);
 
+  
+// Score display: S### at top left, H### at top right.
+  // Four 8-pixel character slots, with a 5-pixel-high font.
+  reg [7:0] score_char;
+  reg [4:0] score_glyph;
+
+  localparam SC_Y  = 45;     // top edge
+  localparam SC_XL = 225;   // left field origin
+  localparam SC_XR = 356;   // right field origin (= 420 - 64, flush with board right edge)
+  localparam SC_W  = 64;    // 4 slots * 16 px
+  localparam SC_H  = 10;    // 5 rows * 2
+
+  wire in_sl = (x >= SC_XL) && (x < SC_XL + SC_W);
+  wire in_sr = (x >= SC_XR) && (x < SC_XR + SC_W);
+  wire showing_high = in_sr;
+
+  wire [9:0] disp_dx  = showing_high ? (x - SC_XR) : (x - SC_XL);
+  wire [9:0] score_dy = y - SC_Y;
+
+  wire [1:0] disp_slot = disp_dx[5:4];    // 16 px pitch
+  wire [2:0] disp_col  = disp_dx[3:1];    // 0..7, glyph uses 0..4 (x2 -> 10 px)
+  wire [2:0] disp_row  = score_dy[3:1];   // 0..4 for dy 0..9
+
+  wire score_area = (y >= SC_Y) && (y < SC_Y + SC_H) && (in_sl || in_sr);
+
+  wire [9:0] shown_score =
+      showing_high ? best_score : score;
+
+  wire [9:0] shown_mod =
+      (shown_score >= 10'd1000) ?
+      (shown_score - 10'd1000) : shown_score;
+
+  wire [9:0] hundreds_full = shown_mod / 10'd100;
+  wire [9:0] tens_full     = (shown_mod / 10'd10) % 10'd10;
+  wire [9:0] ones_full     = shown_mod % 10'd10;
+
+  wire [3:0] digit_hundreds = hundreds_full[3:0];
+  wire [3:0] digit_tens     = tens_full[3:0];
+  wire [3:0] digit_ones     = ones_full[3:0];
+
+  always @(*) begin
+    score_char = 8'd32;
+
+    case (disp_slot)
+      2'd0: score_char = showing_high ? "H" : "S";
+      2'd1: score_char = 8'd48 + {4'd0, digit_hundreds};
+      2'd2: score_char = 8'd48 + {4'd0, digit_tens};
+      2'd3: score_char = 8'd48 + {4'd0, digit_ones};
+      default: score_char = 8'd32;
+    endcase
+  end
+
+  always @(*) begin
+    score_glyph = 5'b00000;
+
+    case (score_char)
+      "S": case (disp_row)
+        0: score_glyph = 5'b01110;
+        1: score_glyph = 5'b10000;
+        2: score_glyph = 5'b01100;
+        3: score_glyph = 5'b00010;
+        4: score_glyph = 5'b11100;
+        default: score_glyph = 5'b00000;
+      endcase
+
+      "H": case (disp_row)
+        0: score_glyph = 5'b10001;
+        1: score_glyph = 5'b10001;
+        2: score_glyph = 5'b11111;
+        3: score_glyph = 5'b10001;
+        4: score_glyph = 5'b10001;
+        default: score_glyph = 5'b00000;
+      endcase
+
+      "0": case (disp_row)
+        0: score_glyph = 5'b01110;
+        1: score_glyph = 5'b10001;
+        2: score_glyph = 5'b10001;
+        3: score_glyph = 5'b10001;
+        4: score_glyph = 5'b01110;
+        default: score_glyph = 5'b00000;
+      endcase
+
+      "1": case (disp_row)
+        0: score_glyph = 5'b00100;
+        1: score_glyph = 5'b01100;
+        2: score_glyph = 5'b00100;
+        3: score_glyph = 5'b00100;
+        4: score_glyph = 5'b01110;
+        default: score_glyph = 5'b00000;
+      endcase
+
+      "2": case (disp_row)
+        0: score_glyph = 5'b01110;
+        1: score_glyph = 5'b10001;
+        2: score_glyph = 5'b00110;
+        3: score_glyph = 5'b01000;
+        4: score_glyph = 5'b11111;
+        default: score_glyph = 5'b00000;
+      endcase
+
+      "3": case (disp_row)
+        0: score_glyph = 5'b11110;
+        1: score_glyph = 5'b00001;
+        2: score_glyph = 5'b01110;
+        3: score_glyph = 5'b00001;
+        4: score_glyph = 5'b11110;
+        default: score_glyph = 5'b00000;
+      endcase
+
+      "4": case (disp_row)
+        0: score_glyph = 5'b10010;
+        1: score_glyph = 5'b10010;
+        2: score_glyph = 5'b11111;
+        3: score_glyph = 5'b00010;
+        4: score_glyph = 5'b00010;
+        default: score_glyph = 5'b00000;
+      endcase
+
+      "5": case (disp_row)
+        0: score_glyph = 5'b11111;
+        1: score_glyph = 5'b10000;
+        2: score_glyph = 5'b11110;
+        3: score_glyph = 5'b00001;
+        4: score_glyph = 5'b11110;
+        default: score_glyph = 5'b00000;
+      endcase
+
+      "6": case (disp_row)
+        0: score_glyph = 5'b01110;
+        1: score_glyph = 5'b10000;
+        2: score_glyph = 5'b11110;
+        3: score_glyph = 5'b10001;
+        4: score_glyph = 5'b01110;
+        default: score_glyph = 5'b00000;
+      endcase
+
+      "7": case (disp_row)
+        0: score_glyph = 5'b11111;
+        1: score_glyph = 5'b00001;
+        2: score_glyph = 5'b00010;
+        3: score_glyph = 5'b00100;
+        4: score_glyph = 5'b00100;
+        default: score_glyph = 5'b00000;
+      endcase
+
+      "8": case (disp_row)
+        0: score_glyph = 5'b01110;
+        1: score_glyph = 5'b10001;
+        2: score_glyph = 5'b01110;
+        3: score_glyph = 5'b10001;
+        4: score_glyph = 5'b01110;
+        default: score_glyph = 5'b00000;
+      endcase
+
+      "9": case (disp_row)
+        0: score_glyph = 5'b01110;
+        1: score_glyph = 5'b10001;
+        2: score_glyph = 5'b01111;
+        3: score_glyph = 5'b00001;
+        4: score_glyph = 5'b01110;
+        default: score_glyph = 5'b00000;
+      endcase
+
+      default: score_glyph = 5'b00000;
+    endcase
+  end
+
+  wire score_pixel =
+      score_area &&
+      (disp_col < 3'd5) &&
+      score_glyph[3'd4 - disp_col];
+
+
   wire in_frame = (x >= X0 - 4) && (x < X0 + 10*CELL + 4) &&
                   (y >= Y0 - 4) && (y < Y0 + 20*CELL + 4);
 
@@ -807,7 +1091,7 @@ end
       else if (piece_on)
         rgb6 = piece_col;
       else if (lit)
-        rgb6 = over ? 6'b010101 : piece_col;
+        rgb6 = over ? 6'b101010 : stored_colour;
     end else if (in_frame) begin
       rgb6 = 6'b101010;
     // end else if (in_p1) begin
@@ -815,12 +1099,16 @@ end
     // end else if (in_p2) begin
     //   rgb6 = p_edge ? 6'b000000 : (level[by[1:0]] ? 6'b111100 : 6'b010101);
     end
-     if (text_pixel) begin
-    if (over)
+
+    if (score_pixel)
+      rgb6 = 6'b111111;
+
+    if (text_pixel) begin
+      if (over)
         rgb6 = blink_red ? 6'b110000 : 6'b111111;
-    else
+      else
         rgb6 = 6'b111111;
-end
+    end
   end
 
   assign rgb = active ? rgb6 : 6'b000000;
