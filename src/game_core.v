@@ -136,7 +136,7 @@ module game_core (
 
   localparam DAS = 4'd12;
 
-  wire [5:0] period = 6'd40 - {level, 2'b00};
+  wire [5:0] period = 6'd10 - {2'b00, level};
   wire       g_due  = ({1'b0, gcnt} + 7'd1) >= {1'b0, period};
 
   // --- tetromino bitmaps (row 0 = bits 3:0). I uses 4x4 box, others 3x3.
@@ -400,6 +400,336 @@ module game_core (
       endcase
     end
   end
+// ------------------------------------------------------------------
+  // Text overlay: 5x7 bitmap font
+  // ------------------------------------------------------------------
+  reg [7:0] msg_char;
+  reg [4:0] msg_idx;
+  reg [2:0] msg_row;
+  reg [4:0] glyph_row;
+
+  wire show_msg = (st == S_OVER);
+
+  // Message vertical position.
+  wire [9:0] msg_y0 = over ? 10'd238 : 10'd222;
+  wire [9:0] msg_dy = y - msg_y0;
+
+  // Select one of the three start-message lines.
+  wire [1:0] text_line =
+      (msg_dy < 10'd14) ? 2'd0 :
+      (msg_dy >= 10'd20 && msg_dy < 10'd34) ? 2'd1 :
+      (msg_dy >= 10'd40 && msg_dy < 10'd54) ? 2'd2 :
+      2'd3;
+
+  // Center each line horizontally on the 800-pixel screen.
+  // Each character slot is 16 pixels wide.
+  wire [9:0] line_x0 =
+      over ? 10'd252 :
+      (text_line == 2'd0) ? 10'd285 :  // PRESS: 5 characters
+      (text_line == 2'd1) ? 10'd245 :  // ANY BUTTON: 10 slots
+      10'd260;                         // TO START: 8 slots
+
+  wire [9:0] msg_dx = x - line_x0;
+
+  wire [9:0] line_width =
+      over ? 10'd144 :
+      (text_line == 2'd0) ? 10'd80 :
+      (text_line == 2'd1) ? 10'd160 :
+      10'd128;
+
+  wire [9:0] line_dy =
+      (text_line == 2'd0) ? msg_dy :
+      (text_line == 2'd1) ? msg_dy - 10'd20 :
+      msg_dy - 10'd40;
+
+  wire msg_area =
+      show_msg &&
+      (text_line != 2'd3 || over) &&
+      (x >= line_x0) &&
+      (x < line_x0 + line_width) &&
+      (y >= msg_y0) &&
+      (y < msg_y0 + (over ? 10'd14 : 10'd54));
+
+  // Decorative panel.
+  wire panel_outer =
+      show_msg &&
+      (x >= 10'd230) && (x < 10'd570) &&
+      (y >= 10'd200) && (y < 10'd300);
+
+  wire panel_inner =
+      show_msg &&
+      (x >= 10'd236) && (x < 10'd564) &&
+      (y >= 10'd206) && (y < 10'd294);
+
+  wire panel_border = panel_outer && !panel_inner;
+
+  wire panel_accent =
+      show_msg &&
+      (x >= 10'd250) && (x < 10'd550) &&
+      (((y >= 10'd212) && (y < 10'd214)) ||
+       ((y >= 10'd286) && (y < 10'd288)));
+
+  wire panel_corners =
+      show_msg &&
+      (((x >= 10'd242) && (x < 10'd260) ||
+        (x >= 10'd540) && (x < 10'd558)) &&
+       (((y >= 10'd218) && (y < 10'd220)) ||
+        ((y >= 10'd280) && (y < 10'd282))));
+
+  // Character selection.
+  always @(*) begin
+    msg_idx  = msg_dx[8:4];
+    msg_row  = over ? msg_dy[3:1] : line_dy[3:1];
+    msg_char = 8'd32;
+
+    if (msg_area) begin
+      if (over) begin
+        case (msg_idx)
+          0: msg_char = "G";
+          1: msg_char = "A";
+          2: msg_char = "M";
+          3: msg_char = "E";
+          4: msg_char = 8'd32;
+          5: msg_char = "O";
+          6: msg_char = "V";
+          7: msg_char = "E";
+          8: msg_char = "R";
+          default: msg_char = 8'd32;
+        endcase
+      end else begin
+        case (text_line)
+          2'd0: begin
+            case (msg_idx)
+              0: msg_char = "P";
+              1: msg_char = "R";
+              2: msg_char = "E";
+              3: msg_char = "S";
+              4: msg_char = "S";
+              default: msg_char = 8'd32;
+            endcase
+          end
+
+          2'd1: begin
+            case (msg_idx)
+              0: msg_char = "A";
+              1: msg_char = "N";
+              2: msg_char = "Y";
+              3: msg_char = 8'd32;
+              4: msg_char = "B";
+              5: msg_char = "U";
+              6: msg_char = "T";
+              7: msg_char = "T";
+              8: msg_char = "O";
+              9: msg_char = "N";
+              default: msg_char = 8'd32;
+            endcase
+          end
+
+          2'd2: begin
+            case (msg_idx)
+              0: msg_char = "T";
+              1: msg_char = "O";
+              2: msg_char = 8'd32;
+              3: msg_char = "S";
+              4: msg_char = "T";
+              5: msg_char = "A";
+              6: msg_char = "R";
+              7: msg_char = "T";
+              default: msg_char = 8'd32;
+            endcase
+          end
+
+          default: msg_char = 8'd32;
+        endcase
+      end
+    end
+  end
+
+  // Five bits per row, left to right.
+  always @(*) begin
+    glyph_row = 5'b00000;
+
+    case (msg_char)
+      "A": case (msg_row)
+        0: glyph_row = 5'b01110;
+        1: glyph_row = 5'b10001;
+        2: glyph_row = 5'b10001;
+        3: glyph_row = 5'b11111;
+        4: glyph_row = 5'b10001;
+        5: glyph_row = 5'b10001;
+        6: glyph_row = 5'b10001;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "B": case (msg_row)
+        0: glyph_row = 5'b11110;
+        1: glyph_row = 5'b10001;
+        2: glyph_row = 5'b10001;
+        3: glyph_row = 5'b11110;
+        4: glyph_row = 5'b10001;
+        5: glyph_row = 5'b10001;
+        6: glyph_row = 5'b11110;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "E": case (msg_row)
+        0: glyph_row = 5'b11111;
+        1: glyph_row = 5'b10000;
+        2: glyph_row = 5'b10000;
+        3: glyph_row = 5'b11110;
+        4: glyph_row = 5'b10000;
+        5: glyph_row = 5'b10000;
+        6: glyph_row = 5'b11111;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "G": case (msg_row)
+        0: glyph_row = 5'b01111;
+        1: glyph_row = 5'b10000;
+        2: glyph_row = 5'b10000;
+        3: glyph_row = 5'b10111;
+        4: glyph_row = 5'b10001;
+        5: glyph_row = 5'b10001;
+        6: glyph_row = 5'b01111;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "M": case (msg_row)
+        0: glyph_row = 5'b10001;
+        1: glyph_row = 5'b11011;
+        2: glyph_row = 5'b10101;
+        3: glyph_row = 5'b10101;
+        4: glyph_row = 5'b10001;
+        5: glyph_row = 5'b10001;
+        6: glyph_row = 5'b10001;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "N": case (msg_row)
+        0: glyph_row = 5'b10001;
+        1: glyph_row = 5'b11001;
+        2: glyph_row = 5'b10101;
+        3: glyph_row = 5'b10101;
+        4: glyph_row = 5'b10101;
+        5: glyph_row = 5'b10011;
+        6: glyph_row = 5'b10001;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "O": case (msg_row)
+        0: glyph_row = 5'b01110;
+        1: glyph_row = 5'b10001;
+        2: glyph_row = 5'b10001;
+        3: glyph_row = 5'b10001;
+        4: glyph_row = 5'b10001;
+        5: glyph_row = 5'b10001;
+        6: glyph_row = 5'b01110;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "P": case (msg_row)
+        0: glyph_row = 5'b11110;
+        1: glyph_row = 5'b10001;
+        2: glyph_row = 5'b10001;
+        3: glyph_row = 5'b11110;
+        4: glyph_row = 5'b10000;
+        5: glyph_row = 5'b10000;
+        6: glyph_row = 5'b10000;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "R": case (msg_row)
+        0: glyph_row = 5'b11110;
+        1: glyph_row = 5'b10001;
+        2: glyph_row = 5'b10001;
+        3: glyph_row = 5'b11110;
+        4: glyph_row = 5'b10100;
+        5: glyph_row = 5'b10010;
+        6: glyph_row = 5'b10001;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "S": case (msg_row)
+        0: glyph_row = 5'b01111;
+        1: glyph_row = 5'b10000;
+        2: glyph_row = 5'b10000;
+        3: glyph_row = 5'b01110;
+        4: glyph_row = 5'b00001;
+        5: glyph_row = 5'b00001;
+        6: glyph_row = 5'b11110;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "T": case (msg_row)
+        0: glyph_row = 5'b11111;
+        1: glyph_row = 5'b00100;
+        2: glyph_row = 5'b00100;
+        3: glyph_row = 5'b00100;
+        4: glyph_row = 5'b00100;
+        5: glyph_row = 5'b00100;
+        6: glyph_row = 5'b00100;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "U": case (msg_row)
+        0: glyph_row = 5'b10001;
+        1: glyph_row = 5'b10001;
+        2: glyph_row = 5'b10001;
+        3: glyph_row = 5'b10001;
+        4: glyph_row = 5'b10001;
+        5: glyph_row = 5'b10001;
+        6: glyph_row = 5'b01110;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "V": case (msg_row)
+        0: glyph_row = 5'b10001;
+        1: glyph_row = 5'b10001;
+        2: glyph_row = 5'b10001;
+        3: glyph_row = 5'b10001;
+        4: glyph_row = 5'b10001;
+        5: glyph_row = 5'b01010;
+        6: glyph_row = 5'b00100;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      "Y": case (msg_row)
+        0: glyph_row = 5'b10001;
+        1: glyph_row = 5'b10001;
+        2: glyph_row = 5'b01010;
+        3: glyph_row = 5'b00100;
+        4: glyph_row = 5'b00100;
+        5: glyph_row = 5'b00100;
+        6: glyph_row = 5'b00100;
+        default: glyph_row = 5'b00000;
+      endcase
+
+      default: glyph_row = 5'b00000;
+    endcase
+  end
+
+   wire text_pixel = msg_area &&
+                    (msg_dx[3:1] < 3'd5) &&
+                    glyph_row[4 - msg_dx[3:1]];
+
+  
+  // Game Over flashing timer
+reg [5:0] blink_count;
+reg       blink_red;
+
+always @(posedge clk) begin
+    if (rst) begin
+        blink_count <= 6'd0;
+        blink_red   <= 1'b0;
+    end else if (frame) begin
+        if (blink_count == 6'd10) begin
+            blink_count <= 6'd0;
+            blink_red   <= ~blink_red;
+        end else begin
+            blink_count <= blink_count + 6'd1;
+        end
+    end
+end
 
   // ------------------------------------------------------------------
   // Video
@@ -441,13 +771,21 @@ module game_core (
   reg [5:0] piece_col;
   always @(*) begin
     case (ptype)
-      3'd0:    piece_col = 6'b001111; // I cyan
-      3'd1:    piece_col = 6'b111100; // O yellow
-      3'd2:    piece_col = 6'b110011; // T magenta
-      3'd3:    piece_col = 6'b001100; // S green
-      3'd4:    piece_col = 6'b110000; // Z red
-      3'd5:    piece_col = 6'b000011; // J blue
-      default: piece_col = 6'b111000; // L orange
+      // 3'd0:    piece_col = 6'b001111; // I cyan
+      // 3'd1:    piece_col = 6'b111100; // O yellow
+      // 3'd2:    piece_col = 6'b110011; // T magenta
+      // 3'd3:    piece_col = 6'b001100; // S green
+      // 3'd4:    piece_col = 6'b110000; // Z red
+      // 3'd5:    piece_col = 6'b000011; // J blue
+      // default: piece_col = 6'b111000; // L orange
+
+      3'd0:    piece_col = 6'b100000; // I cyan
+      3'd1:    piece_col = 6'b111101; // O yellow
+      3'd2:    piece_col = 6'b111110; // T magenta
+      3'd3:    piece_col = 6'b101111; // S green
+      3'd4:    piece_col = 6'b101110; // Z red
+      3'd5:    piece_col = 6'b110110; // J blue
+      default: piece_col = 6'b110111; // L orange
     endcase
   end
 
@@ -465,20 +803,27 @@ module game_core (
     rgb6 = 6'b000000;
     if (in_x && in_y) begin
       if (edge_px)
-        rgb6 = (lit || piece_on) ? 6'b010101 : 6'b000001;
+        rgb6 = (lit || piece_on) ? 6'b000000 : 6'b000000;
       else if (piece_on)
         rgb6 = piece_col;
       else if (lit)
-        rgb6 = over ? 6'b110000 : 6'b101010;
+        rgb6 = over ? 6'b010101 : piece_col;
     end else if (in_frame) begin
       rgb6 = 6'b101010;
-    end else if (in_p1) begin
-      rgb6 = p_edge ? 6'b000000 : (lines[by[2:0]] ? 6'b001100 : 6'b010101);
-    end else if (in_p2) begin
-      rgb6 = p_edge ? 6'b000000 : (level[by[1:0]] ? 6'b111100 : 6'b010101);
+    // end else if (in_p1) begin
+    //   rgb6 = p_edge ? 6'b000000 : (lines[by[2:0]] ? 6'b001100 : 6'b010101);
+    // end else if (in_p2) begin
+    //   rgb6 = p_edge ? 6'b000000 : (level[by[1:0]] ? 6'b111100 : 6'b010101);
     end
+     if (text_pixel) begin
+    if (over)
+        rgb6 = blink_red ? 6'b110000 : 6'b111111;
+    else
+        rgb6 = 6'b111111;
+end
   end
 
   assign rgb = active ? rgb6 : 6'b000000;
-
+  
+  
 endmodule
