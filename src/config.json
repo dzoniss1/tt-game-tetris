@@ -13,7 +13,14 @@
 
   "//": "PL_TARGET_DENSITY_PCT - You can increase this if Global Placement fails with error GPL-0302.",
   "//": "Users have reported that values up to 80 worked well for them.",
-  "PL_TARGET_DENSITY_PCT": 60,
+  "//": "The design fills ~64% of a 1x2 tile. Spread it evenly (70%) instead of packing it,",
+  "//": "so the hold buffers added after clock tree synthesis find free sites (DPL-0036 at 85).",
+  "PL_TARGET_DENSITY_PCT": 70,
+
+  "//": "No extra space around each cell during placement: the sky130 default padding would push",
+  "//": "utilization over the target density (GPL-0301/0302). Routing has plenty of room.",
+  "GPL_CELL_PADDING": 0,
+  "DPL_CELL_PADDING": 0,
 
   "//": "CLOCK_PERIOD - Increase this in case you are getting setup time violations.",
   "//": "The value is in nanoseconds, so 20ns == 50MHz.",

@@ -17,14 +17,9 @@ project:
   # Source files must be in ./src and you must list each source file separately, one per line.
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
-    - "game_core.v"
-    - "ip_ball.v"
-    - "ip_debounce.v"
-    - "ip_paddle.v"
-    - "ip_rect.v"
-    - "ip_tick.v"
     - "project.v"
-    - "vga_shell.v"
+    - "vga_cells.v"
+    - "game_core.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
@@ -32,9 +27,9 @@ pinout:
   # Inputs
   ui[0]: "Left button"
   ui[1]: "Right button"
-  ui[2]: ""
-  ui[3]: ""
-  ui[4]: ""
+  ui[2]: "Rotate button"
+  ui[3]: "Down (one row)"
+  ui[4]: "Input mode: 0 = act on every flip, 1 = act on press"
   ui[5]: ""
   ui[6]: ""
   ui[7]: ""
