@@ -23,7 +23,7 @@ module tt_um_dzoniss1_game_paddle_and_ball (
 
     game_core core (
         .clk(clk), .rst_n(rst_n),
-        .left(ui_in[0]), .right(ui_in[1]), .rot(ui_in[2]), .down(ui_in[3]),
+        .left(ui_in[0]), .right(ui_in[1]), .rot(ui_in[2]), .down(ui_in[3]), .press_mode(ui_in[4]),
         .xh(xh), .xl(xl), .yh(yh), .yl(yl), .active(active), .frame(frame),
         .rgb(rgb)
     );
@@ -33,5 +33,5 @@ module tt_um_dzoniss1_game_paddle_and_ball (
     assign uio_out = 8'd0;
     assign uio_oe  = 8'd0;
 
-    wire _unused = &{ena, uio_in, ui_in[7:4], 1'b0};
+    wire _unused = &{ena, uio_in, ui_in[7:5], 1'b0};
 endmodule

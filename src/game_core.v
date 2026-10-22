@@ -1,17 +1,18 @@
 /*
  * Tetris game core for the Vulkos / Tiny Tapeout game-track shell,
- * area-optimised to fit a single 1x1 tile.
+ * area-optimised (fits a 1x2 tile).
  *
- * Buttons (active high, raw, synchronised and frame-sampled inside):
- *   left, right, rot (rotate), down (soft drop). Any button starts / restarts.
+ * Inputs (active high, sampled once per frame): left, right, rot (rotate),
+ * down (one row down). Each acts once per flip (or per press, press_mode = 1).
+ * Any input starts / restarts.
  *
  * Area tricks:
- *  - The 10x20 board is ONE 200-bit shift register that rotates by one row
+ *  - The 10x20 board is ONE shift register of 20 rows that rotates by one row
  *    every clock (a full turn every 20 clocks). Its flops need no enable and
  *    no read mux: whatever row is at the head is read, and the row fed back
  *    in at the tail is where writes happen. The row at the head is the VGA
  *    x position modulo 20 (rows counted from the bottom), so it costs nothing,
- *    and the row above it is always the next 10 bits of the ring.
+ *    and the row above it is always the next register in the chain.
  *  - All board work runs serially in vertical blanking, straight on the
  *    head: collision test and lock one cell at a time as its row passes, and
  *    line clearing as one turn that copies each row from the one above it,
@@ -22,8 +23,8 @@
  *  - The VGA position comes in 20-pixel cells (vga_cells.v), so pixel -> cell
  *    is plain subtraction of small numbers. The score counts in BCD, so no
  *    dividers.
- *  - Locked cells are coloured by row band: one colour per cell would need
- *    1200 extra flops, more than a whole tile.
+ *  - Each cell keeps the 3-bit type of the piece that locked there, so blocks
+ *    keep their colour until game over.
  *
  * Screen: board 200x400 at (220,40) in 20x20 cells, 4-pixel grey frame,
  * score S### and best H### above the board.
@@ -124,6 +125,7 @@ module game_core (
     input  wire       right,
     input  wire       rot,
     input  wire       down,
+    input  wire       press_mode,  // 0: act on every switch flip, 1: act on press only
     input  wire [5:0] xh,        // x = xh*20 + xl
     input  wire [4:0] xl,
     input  wire [4:0] yh,        // y = yh*20 + yl
@@ -181,34 +183,55 @@ module game_core (
   // Inputs are sampled once per frame. One clock later (tick) the frame
   // counters update, and the FSM starts on the clock after that, so every
   // want_* below is stable while the FSM runs.
+  // Each input acts ONCE per event, never by being held: an event is every
+  // flip of the input (switches, VGA Playground keys) or, with press_mode,
+  // only a press (push buttons).
   reg [3:0]  in_s, in_prev;
+  reg        mode;
   reg        tick;
-  reg [3:0]  hcnt;            // auto-repeat: 1 on press, up to 12, then 13,14,15,12,...
-  reg [3:0]  fcnt;            // frame counter: bit 0 soft drop, bit 3 blink
+  reg [3:0]  fcnt;            // frame counter: bit 3 blink
 
-  wire any_edge = |(in_s & ~in_prev);
-  wire restart  = (st == S_OVER) && tick && any_edge;
+  wire [3:0] ev       = mode ? (in_s & ~in_prev) : (in_s ^ in_prev);
+  wire       restart  = (st == S_OVER) && tick && (|ev);
 
-  wire hdir     = in_s[0];
-  wire want_rot = in_s[2] & ~in_prev[2];
-  wire want_h   = (hcnt == 4'd1) || (hcnt == 4'd13);
-  wire want_d   = (gcnt == 4'd0) || (in_s[3] && !fcnt[0]);
+  wire hdir     = ev[0];                      // left wins if both
+  wire want_rot = ev[2];
+  wire want_h   = ev[0] | ev[1];
+  wire want_d   = (gcnt == 4'd0) || ev[3];
   wire want     = (op == OP_ROT) ? want_rot : (op == OP_H) ? want_h : want_d;
 
   // ------------------------------------------------------------------
-  // Board: 20 rows of 10 cells in one 200-bit shift register that turns by
-  // one row every clock. The top 10 bits (head) hold board row xl; the next
-  // 10 bits hold the row above it. fb is written back as the new value of
-  // the head row.
+  // Board: 20 rows of 10 cells in a chain of row registers (a shift
+  // register) that turns by one row every clock. The last one (head) holds
+  // board row xl; the one before it holds the row above. Each cell holds a
+  // 3-bit code, 0 = empty or piece type + 1, kept as three 10-bit bit planes
+  // (a = bit 0, b = bit 1, c = bit 2), because the Vulkos simulator has no
+  // wide vectors. fb_* is written back as the new value of the head row.
   // ------------------------------------------------------------------
-  reg  [199:0] ring;
-  reg  [9:0]   fb;
-  wire [9:0]   head     = ring[199:190];
-  wire [9:0]   above    = ring[189:180];
-  wire         full_now = &head;
+  reg  [9:0] a0, a1, a2, a3, a4, a5, a6, a7, a8, a9;
+  reg  [9:0] a10, a11, a12, a13, a14, a15, a16, a17, a18, a19;
+  reg  [9:0] b0, b1, b2, b3, b4, b5, b6, b7, b8, b9;
+  reg  [9:0] b10, b11, b12, b13, b14, b15, b16, b17, b18, b19;
+  reg  [9:0] c0, c1, c2, c3, c4, c5, c6, c7, c8, c9;
+  reg  [9:0] c10, c11, c12, c13, c14, c15, c16, c17, c18, c19;
+  reg  [9:0] fb_a, fb_b, fb_c;
+  wire [9:0] head     = a19 | b19 | c19;              // occupied cells of the head row
+  wire       full_now = &head;
 
-  always @(posedge clk)
-    ring <= {ring[189:0], fb};
+  always @(posedge clk) begin
+    a0  <= fb_a; a1  <= a0; a2  <= a1; a3  <= a2; a4  <= a3;
+    a5  <= a4; a6  <= a5; a7  <= a6; a8  <= a7; a9  <= a8;
+    a10 <= a9; a11 <= a10; a12 <= a11; a13 <= a12; a14 <= a13;
+    a15 <= a14; a16 <= a15; a17 <= a16; a18 <= a17; a19 <= a18;
+    b0  <= fb_b; b1  <= b0; b2  <= b1; b3  <= b2; b4  <= b3;
+    b5  <= b4; b6  <= b5; b7  <= b6; b8  <= b7; b9  <= b8;
+    b10 <= b9; b11 <= b10; b12 <= b11; b13 <= b12; b14 <= b13;
+    b15 <= b14; b16 <= b15; b17 <= b16; b18 <= b17; b19 <= b18;
+    c0  <= fb_c; c1  <= c0; c2  <= c1; c3  <= c2; c4  <= c3;
+    c5  <= c4; c6  <= c5; c7  <= c6; c8  <= c7; c9  <= c8;
+    c10 <= c9; c11 <= c10; c12 <= c11; c13 <= c12; c14 <= c13;
+    c15 <= c14; c16 <= c15; c17 <= c16; c18 <= c17; c19 <= c18;
+  end
 
   // Candidate position for the current action. The lock and spawn use
   // OP_NONE, so the candidate is the current piece.
@@ -239,6 +262,7 @@ module game_core (
   wire [3:0] cidx   = vid ? bxn : col;
   wire       cin    = (cidx < 4'd10);
   wire       hbit   = cin && head[cidx];
+  wire [2:0] hcode  = cin ? {c19[cidx], b19[cidx], a19[cidx]} : 3'd0;
 
   wire [3:0] dxs = bx - px;
   wire [4:0] dys = pu - bu;
@@ -254,34 +278,45 @@ module game_core (
   wire lock_wr  = (st == S_LOCK) && tbit && at_row;
   wire shift_dn = flag || full_now;           // S_CPASS: copy rows down from here on
 
+  wire [2:0] code    = ptype + 3'd1;             // what a locked cell stores
+  wire [9:0] onehot  = 10'd1 << col;
+  wire       clr_all = rst || (st == S_OVER && !over) || st == S_CLR2;
+  wire       mv_dn   = (st == S_CPASS) && shift_dn;
+  wire       top     = (xl == 5'd19);
+
   always @(*) begin
-    if (rst || (st == S_OVER && !over) || st == S_CLR2)
-      fb = 10'd0;                                       // clear board
-    else if (lock_wr)
-      fb = head | (10'd1 << col);                       // set one piece cell
-    else if (st == S_CPASS && shift_dn)
-      fb = (xl == 5'd19) ? 10'd0 : above;               // row above moves down
-    else
-      fb = head;
+    if (clr_all) begin                                  // clear board
+      fb_a = 10'd0; fb_b = 10'd0; fb_c = 10'd0;
+    end else if (lock_wr) begin                         // set one piece cell
+      fb_a = a19 | (code[0] ? onehot : 10'd0);
+      fb_b = b19 | (code[1] ? onehot : 10'd0);
+      fb_c = c19 | (code[2] ? onehot : 10'd0);
+    end else if (mv_dn) begin                           // row above moves down
+      fb_a = top ? 10'd0 : a18;
+      fb_b = top ? 10'd0 : b18;
+      fb_c = top ? 10'd0 : c18;
+    end else begin
+      fb_a = a19; fb_b = b19; fb_c = c19;
+    end
   end
 
   // Video: the cell of the next column is read when its row passes the
   // head, and shown from the next cell's first pixel (a black grid line).
-  reg nbit, cbit;
+  reg [2:0] ncode, ccode;
   always @(posedge clk) begin
-    if (vid && at_row) nbit <= hbit;
-    if (xl == 5'd0)    cbit <= nbit;
+    if (vid && at_row) ncode <= hcode;
+    if (xl == 5'd0)    ccode <= ncode;
   end
 
   // BCD increment, saturating at 999.
   wire [3:0]  s0 = score[3:0], s1 = score[7:4], s2 = score[11:8];
-  wire        c0 = (s0 == 4'd9);
-  wire        c1 = c0 && (s1 == 4'd9);
-  wire        smax = c1 && (s2 == 4'd9);
+  wire        bcd_c0 = (s0 == 4'd9);
+  wire        bcd_c1 = bcd_c0 && (s1 == 4'd9);
+  wire        smax = bcd_c1 && (s2 == 4'd9);
   wire [11:0] score_next = smax ? score :
-                           { c1 ? s2 + 4'd1 : s2,
-                             c0 ? (c1 ? 4'd0 : s1 + 4'd1) : s1,
-                             c0 ? 4'd0 : s0 + 4'd1 };
+                           { bcd_c1 ? s2 + 4'd1 : s2,
+                             bcd_c0 ? (bcd_c1 ? 4'd0 : s1 + 4'd1) : s1,
+                             bcd_c0 ? 4'd0 : s0 + 4'd1 };
 
   // A cell is done when it is empty in the box, or its row is at the head
   // (test: and it is free; lock: it is written now).
@@ -299,8 +334,8 @@ module game_core (
       st <= S_OVER; over <= 1'b0;
       lfsr <= 8'hA5;
       lcnt <= 4'd0; spd <= 4'd9; gcnt <= 4'd0;
-      in_s <= 4'd0; in_prev <= 4'd0;
-      hcnt <= 4'd0; fcnt <= 4'd0;
+      in_s <= 4'd0; in_prev <= 4'd0; mode <= 1'b0;
+      fcnt <= 4'd0;
       score <= 12'd0;
       best_score <= 12'd0;
     end else begin
@@ -309,12 +344,10 @@ module game_core (
       if (frame) begin
         in_s    <= {down, rot, right, left};
         in_prev <= in_s;
+        mode    <= press_mode;
       end
       if (tick) begin
         fcnt <= fcnt + 4'd1;
-        if (!(in_s[0] | in_s[1])) hcnt <= 4'd0;
-        else if (hcnt == 4'd15)   hcnt <= 4'd12;
-        else                      hcnt <= hcnt + 4'd1;
         gcnt <= (gcnt >= spd) ? 4'd0 : gcnt + 4'd1;
       end
 
@@ -480,10 +513,10 @@ module game_core (
   // ------------------------------------------------------------------
   wire piece_on = (st != S_OVER) && (dxs[3:2] == 2'd0) && (dys[4:2] == 3'd0) && tbit;
 
-  // One palette: falling piece by type, locked cells by row band.
+  // One palette by piece type, for the falling piece and the locked cells.
   reg [5:0] pal;
   always @(*) begin
-    case (piece_on ? ptype : cy[2:0])
+    case (piece_on ? ptype : ccode - 3'd1)
       3'd0:    pal = 6'b100000;
       3'd1:    pal = 6'b111101;
       3'd2:    pal = 6'b111110;
@@ -502,7 +535,7 @@ module game_core (
 
   wire [5:0] board_px = edge_px  ? 6'b000000 :
                         piece_on ? pal :
-                        cbit     ? (over ? 6'b101010 : pal) : 6'b000000;
+                        (ccode != 3'd0) ? (over ? 6'b101010 : pal) : 6'b000000;
 
   wire [5:0] rgb6 = text_pixel ? ((l_go && fcnt[3]) ? 6'b110000 : 6'b111111) :
                     in_board   ? board_px :
