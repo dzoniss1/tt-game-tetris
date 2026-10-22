@@ -15,6 +15,11 @@
   "//": "Users have reported that values up to 80 worked well for them.",
   "PL_TARGET_DENSITY_PCT": 85,
 
+  "//": "No extra space around each cell during placement. The sky130 default pads every cell,",
+  "//": "which turns this design's ~77% utilization into >100% (GPL-0301). Routing has plenty of room.",
+  "GPL_CELL_PADDING": 0,
+  "DPL_CELL_PADDING": 0,
+
   "//": "CLOCK_PERIOD - Increase this in case you are getting setup time violations.",
   "//": "The value is in nanoseconds, so 20ns == 50MHz.",
   "CLOCK_PERIOD": 20,
